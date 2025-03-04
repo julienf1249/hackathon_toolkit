@@ -9,11 +9,11 @@ class DQN(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(DQN, self).__init__()
         self.network = nn.Sequential(
-            nn.Linear(input_dim, 256),
+            nn.Linear(input_dim, 128),
             nn.ReLU(),
-            nn.Linear(256, 256),
+            nn.Linear(128, 128),
             nn.ReLU(),
-            nn.Linear(256, output_dim)
+            nn.Linear(128, output_dim)
         )
     
     def forward(self, x):
@@ -24,7 +24,9 @@ class MyAgent():
         # Parameters
         self.num_agents = num_agents
         self.n_actions = 7  # 0:stay, 1-4:movement, 5-6:rotation
-        self.state_dim = 26  # State dimension after preprocessing
+        
+        # Important: Define exact state dimension
+        self.state_dim = 22  # Fixed dimension after feature extraction
         
         # Check if GPU is available
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -37,7 +39,7 @@ class MyAgent():
         self.epsilon_decay = 0.995
         self.learning_rate = 0.0005
         self.batch_size = 64
-        self.memory_size = 100000
+        self.memory_size = 50000
         self.update_target_freq = 1000
         self.training_steps = 0
         
@@ -54,7 +56,7 @@ class MyAgent():
             # Target network (for stable Q-value targets)
             target_net = DQN(self.state_dim, self.n_actions).to(self.device)
             target_net.load_state_dict(policy_net.state_dict())
-            target_net.eval()  # Target network is only used for inference
+            target_net.eval()
             
             # Optimizer
             optimizer = optim.Adam(policy_net.parameters(), lr=self.learning_rate)
@@ -72,49 +74,60 @@ class MyAgent():
         self.previous_actions = [None] * num_agents
         self.loss_criterion = nn.MSELoss()
         
-        # For parallel processing
-        self.current_transitions = []
-
     def _state_to_tensor(self, state):
-        """Convert state array to a tensor with feature engineering"""
-        # Extract basic features
-        pos_x, pos_y, orientation = state[0], state[1], state[2]
-        goal_x, goal_y = state[4], state[5]
+        """Convert state array to tensor with consistent feature engineering"""
+        # Handle terminal states or invalid states
+        if state is None or (isinstance(state, np.ndarray) and state[0] == -1):
+            # Return zeros for terminal states
+            return torch.zeros(self.state_dim, device=self.device)
         
-        # Calculate relative position to goal
+        # Basic features
+        pos_x, pos_y = float(state[0]), float(state[1])
+        orientation = int(state[2])
+        goal_x, goal_y = float(state[4]), float(state[5])
+        
+        # Calculate relative goal position
         rel_x = goal_x - pos_x
         rel_y = goal_y - pos_y
         
         # Distance to goal
         goal_dist = np.sqrt(rel_x**2 + rel_y**2)
         
-        # Relative angle to goal (in radians)
-        goal_angle = np.arctan2(rel_y, rel_x) - orientation * np.pi/2
-        goal_angle = (goal_angle + np.pi) % (2*np.pi) - np.pi  # Normalize to [-π, π]
+        # Orientation features (one-hot)
+        orientation_one_hot = [0.0, 0.0, 0.0, 0.0]
+        if 0 <= orientation < 4:  # Safety check
+            orientation_one_hot[orientation] = 1.0
         
-        # One-hot encode orientation
-        orientation_one_hot = [0, 0, 0, 0]
-        orientation_one_hot[int(orientation)] = 1
+        # Process LIDAR data
+        lidar_features = []
+        for i in range(6, 24, 2):  # Process all 9 LIDAR directions
+            if i < len(state):
+                dist = float(state[i])
+                obj_type = float(state[i+1])
+                # Normalize distance (1.0 for max range, less for closer objects)
+                norm_dist = min(dist / 10.0, 1.0)
+                lidar_features.extend([norm_dist, obj_type])
         
-        # Extract LIDAR data (main + 8 directions)
-        lidar_data = []
-        for i in range(6, 24, 2):
-            distance = state[i]
-            object_type = state[i+1]
-            lidar_data.extend([distance, object_type])
+        # Ensure we have the right number of LIDAR features
+        while len(lidar_features) < 18:
+            lidar_features.extend([0.0, 0.0])  # Pad with zeros if needed
         
-        # Compile all features
+        # Combine all features
         features = [
-            pos_x, pos_y,
-            rel_x, rel_y,
-            goal_dist,
-            np.sin(goal_angle), np.cos(goal_angle),
+            pos_x / 50.0,  # Normalize positions
+            pos_y / 50.0,
+            rel_x / 50.0,
+            rel_y / 50.0,
+            goal_dist / 70.0,  # Normalize distance
             *orientation_one_hot,
-            *lidar_data
+            *lidar_features[:18]  # Take exactly 18 LIDAR features
         ]
         
-        return torch.FloatTensor(features).to(self.device)
-
+        # Ensure we have exactly state_dim features
+        features = features[:self.state_dim]
+        
+        return torch.tensor(features, dtype=torch.float32, device=self.device)
+        
     def get_action(self, states, evaluation=False):
         """Choose actions using epsilon-greedy policy"""
         actions = []
@@ -125,25 +138,33 @@ class MyAgent():
             # Skip deactivated or evacuated agents (-1 values)
             if state[0] == -1:
                 actions.append(0)  # Stay in place
+                self.previous_states[i] = None  # Mark as no state
+                self.previous_actions[i] = 0
                 continue
             
-            state_tensor = self._state_to_tensor(state)
-            
-            # Epsilon-greedy action selection
-            if evaluation or random.random() > self.epsilon:
-                # Exploitation: choose best action
-                with torch.no_grad():  # No need to compute gradients for action selection
-                    q_values = self.policy_nets[i](state_tensor)
-                    action = q_values.argmax().item()
-            else:
-                # Exploration: choose random action
-                action = random.randint(0, self.n_actions - 1)
-            
-            # Store current state and action for learning
-            self.previous_states[i] = state
-            self.previous_actions[i] = action
-            
-            actions.append(action)
+            try:
+                # Convert state to tensor
+                state_tensor = self._state_to_tensor(state)
+                
+                # Epsilon-greedy action selection
+                if evaluation or random.random() > self.epsilon:
+                    # Exploitation: choose best action
+                    with torch.no_grad():
+                        q_values = self.policy_nets[i](state_tensor.unsqueeze(0))
+                        action = q_values.argmax().item()
+                else:
+                    # Exploration: choose random action
+                    action = random.randint(0, self.n_actions - 1)
+                
+                # Store current state and action for learning
+                self.previous_states[i] = state
+                self.previous_actions[i] = action
+                
+                actions.append(action)
+            except Exception as e:
+                print(f"Error in get_action for agent {i}: {e}")
+                actions.append(0)  # Default action in case of error
+                self.previous_states[i] = None
         
         return actions
 
@@ -158,63 +179,77 @@ class MyAgent():
             if self.previous_states[i] is None:
                 continue
                 
-            # Check if the agent is still active
+            # Check if the agent is deactivated or reached goal
             is_terminal = new_states[i][0] == -1
             
-            # Store transition in replay buffer
+            # Store transition
             self.replay_buffers[i].append((
                 self.previous_states[i],
                 self.previous_actions[i],
                 rewards[i],
-                new_states[i] if not is_terminal else None,
+                None if is_terminal else new_states[i],
                 is_terminal
             ))
         
         # Train on mini-batches
         self.training_steps += 1
         
-        # Process all agents in parallel for efficiency
         for i in range(self.num_agents):
+            # Skip training if we don't have enough samples
             if len(self.replay_buffers[i]) < self.batch_size:
                 continue
+            
+            try:
+                # Sample a mini-batch
+                mini_batch = random.sample(self.replay_buffers[i], self.batch_size)
                 
-            # Sample a mini-batch
-            mini_batch = random.sample(self.replay_buffers[i], self.batch_size)
-            
-            # Extract batch data with parallel processing
-            states = torch.stack([self._state_to_tensor(s) for s, _, _, _, _ in mini_batch])
-            actions = torch.LongTensor([a for _, a, _, _, _ in mini_batch]).to(self.device)
-            rewards = torch.FloatTensor([r for _, _, r, _, _ in mini_batch]).to(self.device)
-            
-            # Process non-terminal states
-            non_terminal_mask = torch.BoolTensor([not t for _, _, _, _, t in mini_batch]).to(self.device)
-            next_states = torch.stack([
-                self._state_to_tensor(ns) if ns is not None else self._state_to_tensor(np.zeros_like(mini_batch[0][0]))
-                for _, _, _, ns, _ in mini_batch
-            ])
-            
-            # Compute current Q values
-            current_q_values = self.policy_nets[i](states).gather(1, actions.unsqueeze(1)).squeeze(1)
-            
-            # Compute next Q values
-            next_q_values = torch.zeros(self.batch_size, device=self.device)
-            if non_terminal_mask.any():
+                # Process batch data
+                batch_states = []
+                batch_actions = []
+                batch_rewards = []
+                batch_next_states = []
+                batch_terminals = []
+                
+                # Process each experience in the batch
+                for s, a, r, ns, t in mini_batch:
+                    batch_states.append(self._state_to_tensor(s))
+                    batch_actions.append(a)
+                    batch_rewards.append(r)
+                    batch_next_states.append(self._state_to_tensor(ns))
+                    batch_terminals.append(t)
+                
+                # Convert to tensors
+                state_tensor = torch.stack(batch_states)
+                action_tensor = torch.tensor(batch_actions, dtype=torch.int64, device=self.device)
+                reward_tensor = torch.tensor(batch_rewards, dtype=torch.float32, device=self.device)
+                next_state_tensor = torch.stack(batch_next_states)
+                terminal_tensor = torch.tensor(batch_terminals, dtype=torch.bool, device=self.device)
+                
+                # Calculate current Q values
+                current_q_values = self.policy_nets[i](state_tensor).gather(1, action_tensor.unsqueeze(1)).squeeze(1)
+                
+                # Calculate next Q values (zeroed for terminal states)
+                next_q_values = torch.zeros(self.batch_size, device=self.device)
                 with torch.no_grad():
-                    next_q_values[non_terminal_mask] = self.target_nets[i](next_states[non_terminal_mask]).max(1)[0]
-            
-            # Compute target Q values
-            target_q_values = rewards + self.gamma * next_q_values
-            
-            # Compute loss
-            loss = self.loss_criterion(current_q_values, target_q_values)
-            
-            # Optimize the model
-            self.optimizers[i].zero_grad()
-            loss.backward()
-            # Clip gradients to prevent exploding gradients
-            for param in self.policy_nets[i].parameters():
-                param.grad.data.clamp_(-1, 1)
-            self.optimizers[i].step()
+                    # Only calculate for non-terminal states
+                    next_q_values[~terminal_tensor] = self.target_nets[i](next_state_tensor[~terminal_tensor]).max(1)[0]
+                
+                # Calculate target Q values
+                target_q_values = reward_tensor + self.gamma * next_q_values
+                
+                # Compute loss
+                loss = self.loss_criterion(current_q_values, target_q_values)
+                
+                # Optimize the model
+                self.optimizers[i].zero_grad()
+                loss.backward()
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(self.policy_nets[i].parameters(), 1.0)
+                self.optimizers[i].step()
+                
+            except Exception as e:
+                print(f"Error in update_policy for agent {i}: {e}")
+                continue
         
         # Update target networks periodically
         if self.training_steps % self.update_target_freq == 0:
