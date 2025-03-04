@@ -1,64 +1,122 @@
 import numpy as np
-import pickle
-from collections import defaultdict
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import random
+from collections import deque
+
+class DQN(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(DQN, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, output_dim)
+        )
+    
+    def forward(self, x):
+        return self.network(x)
 
 class MyAgent():
     def __init__(self, num_agents: int):
         # Parameters
         self.num_agents = num_agents
         self.n_actions = 7  # 0:stay, 1-4:movement, 5-6:rotation
+        self.state_dim = 26  # State dimension after preprocessing
         
-        # Q-learning parameters
-        self.alpha = 0.1  # Learning rate
-        self.gamma = 0.99  # Discount factor
-        self.epsilon = 1.0  # Exploration rate
+        # Check if GPU is available
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {self.device}")
+        
+        # DQN parameters
+        self.gamma = 0.99
+        self.epsilon = 1.0
         self.epsilon_min = 0.05
         self.epsilon_decay = 0.995
-        self.training_steps = 0
+        self.learning_rate = 0.0005
+        self.batch_size = 64
+        self.memory_size = 100000
+        self.update_target_freq = 10000
+        self.training_steps = 0= 0
         
-        # Initialize Q-tables as defaultdict to handle new states
-        self.q_tables = [defaultdict(lambda: np.zeros(self.n_actions)) for _ in range(num_agents)]
+        # Create networks for each agent each agent
+        self.policy_nets = []
+        self.target_nets = []self.target_nets = []
+        self.optimizers = []
+        self.replay_buffers = [][]
         
-        # Store previous states and actions for learning
-        self.previous_states = [None] * num_agents
-        self.previous_actions = [None] * num_agents
+        for i in range(num_agents):for i in range(num_agents):
+            # Policy network (for action selection)
+            policy_net = DQN(self.state_dim, self.n_actions).to(self.device)cy_net = DQN(self.state_dim, self.n_actions).to(self.device)
+            
+            # Target network (for stable Q-value targets)table Q-value targets)
+            target_net = DQN(self.state_dim, self.n_actions).to(self.device), self.n_actions).to(self.device)
+            target_net.load_state_dict(policy_net.state_dict())cy_net.state_dict())
+            target_net.eval()  # Target network is only used for inferencetwork is only used for inference
+               
+            # Optimizer            # Optimizer
+            optimizer = optim.Adam(policy_net.parameters(), lr=self.learning_rate)eters(), lr=self.learning_rate)
+            
+            # Experience replay bufference replay buffer
+            replay_buffer = deque(maxlen=self.memory_size)    replay_buffer = deque(maxlen=self.memory_size)
+            
+            self.policy_nets.append(policy_net)append(policy_net)
+            self.target_nets.append(target_net)self.target_nets.append(target_net)
+            self.optimizers.append(optimizer)
+            self.replay_buffers.append(replay_buffer)s.append(replay_buffer)
         
-        # Random generator
-        self.rng = np.random.default_rng()
+        # Store previous states and actions for learning states and actions for learning
+        self.previous_states = [None] * num_agents.previous_states = [None] * num_agents
+        self.previous_actions = [None] * num_agentsts
+        self.loss_criterion = nn.MSELoss()
+        
+        # For parallel processing
+        self.current_transitions = []
 
-    def _state_to_key(self, state):
-        """Convert state array to a hashable key by focusing on important elements"""
-        # Agent position and orientation
-        pos_x, pos_y, orientation = state[0], state[1], state[2]
-        
-        # Goal position
-        goal_x, goal_y = state[4], state[5]
-        
-        # Extract LIDAR information for main direction
-        main_dist = state[6]
-        main_type = state[7]
-        
-        # Secondary LIDAR information
-        sec1_dist = state[8]
-        sec1_type = state[9]
-        sec2_dist = state[10]
-        sec2_type = state[11]
+    def _state_to_tensor(self, state):
+        """Convert state array to a tensor with feature engineering"""t state array to a tensor with feature engineering"""
+        # Extract basic features
+        pos_x, pos_y, orientation = state[0], state[1], state[2][2]
+        goal_x, goal_y = state[4], state[5]_x, goal_y = state[4], state[5]
         
         # Calculate relative position to goal
         rel_x = goal_x - pos_x
-        rel_y = goal_y - pos_y
+        rel_y = goal_y - pos_yy = goal_y - pos_y
         
-        # Return a tuple of relevant state information
-        return (
-            int(pos_x), int(pos_y), int(orientation),
-            int(rel_x), int(rel_y),
-            int(main_dist), int(main_type),
-            int(sec1_dist), int(sec1_type),
-            int(sec2_dist), int(sec2_type)
-        )
+        # Distance to goal# Distance to goal
+        goal_dist = np.sqrt(rel_x**2 + rel_y**2).sqrt(rel_x**2 + rel_y**2)
+                
+        # Relative angle to goal (in radians)
+        goal_angle = np.arctan2(rel_y, rel_x) - orientation * np.pi/2n * np.pi/2
+        goal_angle = (goal_angle + np.pi) % (2*np.pi) - np.pi  # Normalize to [-π, π]+ np.pi) % (2*np.pi) - np.pi  # Normalize to [-π, π]
+        
+        # One-hot encode orientation
+        orientation_one_hot = [0, 0, 0, 0]orientation_one_hot = [0, 0, 0, 0]
+        orientation_one_hot[int(orientation)] = 1orientation)] = 1
+        
+        # Extract LIDAR data (main + 8 directions)irections)
+        lidar_data = []
+        for i in range(6, 24, 2):
+            distance = state[i]tate[i]
+            object_type = state[i+1]object_type = state[i+1]
+            lidar_data.extend([distance, object_type])ject_type])
+        
+        # Compile all features
+        features = [
+            pos_x, pos_y,pos_x, pos_y,
+            rel_x, rel_y,
+            goal_dist,
+            np.sin(goal_angle), np.cos(goal_angle),np.sin(goal_angle), np.cos(goal_angle),
+            *orientation_one_hot,
+            *lidar_data
+        ]
+        
+        return torch.FloatTensor(features).to(self.device)
 
-    def get_action(self, states, evaluation=False):
-        """Choose actions using epsilon-greedy policy"""
+    def get_action(self, states, evaluation=False):n(self, states, evaluation=False):
+        """Choose actions using epsilon-greedy policy""" actions using epsilon-greedy policy"""
         actions = []
         
         for i in range(self.num_agents):
@@ -69,19 +127,20 @@ class MyAgent():
                 actions.append(0)  # Stay in place
                 continue
             
-            state_key = self._state_to_key(state)
-            q_values = self.q_tables[i][state_key]
+            state_tensor = self._state_to_tensor(state)
             
             # Epsilon-greedy action selection
-            if evaluation or self.rng.random() > self.epsilon:
+            if evaluation or random.random() > self.epsilon:
                 # Exploitation: choose best action
-                action = np.argmax(q_values)
+                with torch.no_grad():  # No need to compute gradients for action selection
+                    q_values = self.policy_nets[i](state_tensor)
+                    action = q_values.argmax().item()
             else:
                 # Exploration: choose random action
-                action = self.rng.integers(0, self.n_actions)
+                action = random.randint(0, self.n_actions - 1)
             
             # Store current state and action for learning
-            self.previous_states[i] = state_key
+            self.previous_states[i] = state
             self.previous_actions[i] = action
             
             actions.append(action)
@@ -89,65 +148,116 @@ class MyAgent():
         return actions
 
     def update_policy(self, actions, new_states, rewards):
-        """Update Q-values using Q-learning update rule"""
-        # Decay epsilon over time
+        """Update policy using experience replay and DQN"""
+        # Decay epsilon
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
         
-        self.training_steps += 1
-        
+        # Store transitions
         for i in range(self.num_agents):
-            # Skip if no previous state (first step of an episode)
             if self.previous_states[i] is None:
                 continue
-            
-            # Get previous state and action
-            prev_state = self.previous_states[i]
-            prev_action = self.previous_actions[i]
-            reward = rewards[i]
-            
-            # Get current state
-            current_state = new_states[i]
-            
-            # For deactivated or evacuated agents, we use the reward directly
-            if current_state[0] == -1:
-                # Q-learning update: Q(s,a) = Q(s,a) + alpha * (r - Q(s,a))
-                # For terminal states, there's no future reward
-                self.q_tables[i][prev_state][prev_action] += self.alpha * (
-                    reward - self.q_tables[i][prev_state][prev_action]
-                )
-            else:
-                # Convert current state to key
-                current_key = self._state_to_key(current_state)
                 
-                # Q-learning update: Q(s,a) = Q(s,a) + alpha * (r + gamma * max(Q(s')) - Q(s,a))
-                self.q_tables[i][prev_state][prev_action] += self.alpha * (
-                    reward + self.gamma * np.max(self.q_tables[i][current_key]) - 
-                    self.q_tables[i][prev_state][prev_action]
-                )
+            # Check if the agent is still active
+            is_terminal = new_states[i][0] == -1
+            
+            # Store transition in replay buffer
+            self.replay_buffers[i].append((
+                self.previous_states[i],
+                self.previous_actions[i],
+                rewards[i],
+                new_states[i] if not is_terminal else None,
+                is_terminal
+            ))
+        
+        # Train on mini-batches
+        self.training_steps += 1
+        
+        # Process all agents in parallel for efficiency
+        for i in range(self.num_agents):
+            if len(self.replay_buffers[i]) < self.batch_size:
+                continue
+                
+            # Sample a mini-batch
+            mini_batch = random.sample(self.replay_buffers[i], self.batch_size)
+            
+            # Extract batch data with parallel processing
+            states = torch.stack([self._state_to_tensor(s) for s, _, _, _, _ in mini_batch])
+            actions = torch.LongTensor([a for _, a, _, _, _ in mini_batch]).to(self.device)
+            rewards = torch.FloatTensor([r for _, _, r, _, _ in mini_batch]).to(self.device)
+            
+            # Process non-terminal states
+            non_terminal_mask = torch.BoolTensor([not t for _, _, _, _, t in mini_batch]).to(self.device)
+            next_states = torch.stack([
+                self._state_to_tensor(ns) if ns is not None else self._state_to_tensor(np.zeros_like(mini_batch[0][0]))
+                for _, _, _, ns, _ in mini_batch
+            ])
+            
+            # Compute current Q values
+            current_q_values = self.policy_nets[i](states).gather(1, actions.unsqueeze(1)).squeeze(1)
+            
+            # Compute next Q values
+            next_q_values = torch.zeros(self.batch_size, device=self.device)
+            if non_terminal_mask.any():
+                with torch.no_grad():
+                    next_q_values[non_terminal_mask] = self.target_nets[i](next_states[non_terminal_mask]).max(1)[0]
+            
+            # Compute target Q values
+            target_q_values = rewards + self.gamma * next_q_values
+            
+            # Compute loss
+            loss = self.loss_criterion(current_q_values, target_q_values)
+            
+            # Optimize the model
+            self.optimizers[i].zero_grad()
+            loss.backward()
+            # Clip gradients to prevent exploding gradients
+            for param in self.policy_nets[i].parameters():
+                param.grad.data.clamp_(-1, 1)
+            self.optimizers[i].step()
+        
+        # Update target networks periodically
+        if self.training_steps % self.update_target_freq == 0:
+            for i in range(self.num_agents):
+                self.target_nets[i].load_state_dict(self.policy_nets[i].state_dict())
+
+    def save_model(self, filename='dqn_agent.pt'):
+        """Save models to a file"""
+        save_dict = {
+            'epsilon': self.epsilon,
+            'models': [net.state_dict() for net in self.policy_nets]
+        }
+        torch.save(save_dict, filename)
+        
+    def load_model(self, filename='dqn_agent.pt'):
+        """Load models from a file"""
+        checkpoint = torch.load(filename, map_location=self.device)
+        self.epsilon = checkpoint['epsilon']
+        
+        # Load model parameters
+        for i, state_dict in enumerate(checkpoint['models']):
+            self.policy_nets[i].load_state_dict(state_dict)
+            self.target_nets[i].load_state_dict(state_dict)
+
+def compute_reward(num_agents, old_positions, agent_positions, evacuated_agents, deactivated_agents, goal_area):
+    rewards = np.zeros(num_agents)
     
-    def save_model(self, filename='q_agent.pkl'):
-        """Save Q-tables to a file"""
-        # Convert defaultdicts to regular dicts for serialization
-        q_tables_dict = [{str(k): v for k, v in q_table.items()} for q_table in self.q_tables]
-        
-        with open(filename, 'wb') as f:
-            pickle.dump({
-                'q_tables': q_tables_dict,
-                'epsilon': self.epsilon
-            }, f)
-        
-    def load_model(self, filename='q_agent.pkl'):
-        """Load Q-tables from a file"""
-        with open(filename, 'rb') as f:
-            data = pickle.load(f)
-            
-        # Reconstruct defaultdicts
-        self.q_tables = []
-        for q_dict in data['q_tables']:
-            q_table = defaultdict(lambda: np.zeros(self.n_actions))
-            for k, v in q_dict.items():
-                q_table[eval(k)] = v
-            self.q_tables.append(q_table)
-            
-        self.epsilon = data['epsilon']
+    # Convert goal_area to a list of tuples for easier checking
+    goal_area_tuples = [tuple(g) for g in goal_area]
+    goal_center = np.mean(goal_area, axis=0)
+
+    # Compute reward for each agent
+    for i, (old_pos, new_pos) in enumerate(zip(old_positions, agent_positions)):
+        if i in evacuated_agents:
+            # Already evacuated agents get no additional reward
+            continue
+        elif i in deactivated_agents:
+            # Significant penalty for deactivation (collision)
+            rewards[i] = -100.0
+        elif tuple(new_pos) in goal_area_tuples:
+            # Substantial reward for reaching goal
+            rewards[i] = 1000.0
+            evacuated_agents.add(i)
+        else:
+            # Calculate the distances to goal before and after the move
+            old_distance = min(np.linalg.norm(np.array(old_pos) - np.array(goal)) for goal in goal_area)
