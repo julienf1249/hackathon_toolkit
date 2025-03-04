@@ -1,54 +1,107 @@
+from typing import Dict, List, Any, Tuple
 import numpy as np
+import math
 
 def compute_reward(num_agents, old_positions, agent_positions, evacuated_agents, deactivated_agents, goal_area):
     rewards = np.zeros(num_agents)
-    
-    # Convert goal_area to a list of tuples for easier checking
-    goal_area_tuples = [tuple(g) for g in goal_area]
-    goal_center = np.mean(goal_area, axis=0)
 
     # Compute reward for each agent
     for i, (old_pos, new_pos) in enumerate(zip(old_positions, agent_positions)):
         if i in evacuated_agents:
-            # Already evacuated agents get no additional reward
             continue
-        elif i in deactivated_agents:
-            # Significant penalty for deactivation (collision)
+        elif i in deactivated_agents:   # Penalties for each deactivated agent
             rewards[i] = -100.0
-        elif tuple(new_pos) in goal_area_tuples:
-            # Substantial reward for reaching goal
+        elif tuple(new_pos) in goal_area:   # One-time reward for each agent reaching the goal
             rewards[i] = 1000.0
             evacuated_agents.add(i)
         else:
-            # Calculate the distances to goal before and after the move
-            old_distance = min(np.linalg.norm(np.array(old_pos) - np.array(goal)) for goal in goal_area)
-            new_distance = min(np.linalg.norm(np.array(new_pos) - np.array(goal)) for goal in goal_area)
-            
-            # Base reward with small penalty to encourage efficiency
+            # Penalties for not finding the goal
             rewards[i] = -0.1
-            
-            # Significant reward for getting closer to goal
-            distance_delta = old_distance - new_distance
-            if distance_delta > 0:
-                # Reward proportional to progress
-                rewards[i] += 5.0 * distance_delta
-            else:
-                # Small penalty for moving away
-                rewards[i] += 1.0 * distance_delta  # This will subtract since delta is negative
-            
-            # Penalty for staying in place
-            if np.array_equal(old_pos, new_pos):
-                rewards[i] -= 1.0
-                
-            # Add a small directional reward (closer to goal center is better)
-            direction_to_goal = np.array(goal_center) - np.array(new_pos)
-            direction_to_goal = direction_to_goal / np.linalg.norm(direction_to_goal) if np.linalg.norm(direction_to_goal) > 0 else np.zeros(2)
-            movement_direction = np.array(new_pos) - np.array(old_pos)
-            movement_direction = movement_direction / np.linalg.norm(movement_direction) if np.linalg.norm(movement_direction) > 0 else np.zeros(2)
-            
-            # Dot product to measure alignment of movement with direction to goal
-            if np.linalg.norm(movement_direction) > 0:
-                alignment = np.dot(direction_to_goal, movement_direction)
-                rewards[i] += 2.0 * alignment
-                
+
     return rewards, evacuated_agents
+
+def calculate_reward(prev_state: Dict[str, Any], 
+                    next_state: Dict[str, Any], 
+                    action: int, 
+                    prev_dist_from_goal: List[float], 
+                    next_dist_from_goal: List[float]) -> float:
+    """
+    Calculate the reward for the current step.
+    
+    Args:
+        prev_state: The previous state.
+        next_state: The current state.
+        action: The action taken.
+        prev_dist_from_goal: Previous distances from goal for all agents.
+        next_dist_from_goal: Current distances from goal for all agents.
+    
+    Returns:
+        A float representing the reward.
+    """
+    reward = 0.0
+    
+    # Evacuation reward (agent reached goal)
+    if next_state["status"] == 1:  # 1 = evacuated (reached goal)
+        reward += 1000.0
+    
+    # Deactivation penalty (agent hit obstacle)
+    elif next_state["status"] == 2:  # 2 = deactivated (hit obstacle or wall)
+        reward -= 100.0
+    
+    else:
+        # Step penalty (encourages efficiency)
+        reward -= 0.1
+        
+        # Progress reward - bonus for getting closer to goal
+        agent_id = next_state["id"]
+        distance_improvement = prev_dist_from_goal[agent_id] - next_dist_from_goal[agent_id]
+        progress_reward = distance_improvement * 10.0
+        reward += progress_reward
+        
+        # Safety reward - based on LIDAR readings
+        # Main LIDAR (front)
+        if next_state["lidar_main_type"] > 0:  # If there's an obstacle
+            danger_factor = max(0, 1.0 - (next_state["lidar_main_dist"] / 10.0))
+            # Higher penalty the closer we are and for more dangerous obstacles
+            obstacle_type_factor = 1.0 if next_state["lidar_main_type"] == 1 else 2.0  # Higher for dynamic obstacles
+            safety_penalty = -danger_factor * obstacle_type_factor * 2.0
+            reward += safety_penalty
+        
+        # Side LIDARs (left and right)
+        for lidar_dir, lidar_dist in [("lidar_left_dist", "lidar_left_type"), 
+                                    ("lidar_right_dist", "lidar_right_type")]:
+            if next_state[lidar_dist] > 0:  # If there's an obstacle
+                danger_factor = max(0, 1.0 - (next_state[lidar_dir] / 5.0))
+                obstacle_type_factor = 1.0 if next_state[lidar_dist] == 1 else 1.5  # Higher for dynamic obstacles
+                safety_penalty = -danger_factor * obstacle_type_factor * 1.0
+                reward += safety_penalty
+        
+        # Direction efficiency - reward for facing the goal
+        goal_dx = next_state["goal_x"] - next_state["x"]
+        goal_dy = next_state["goal_y"] - next_state["y"]
+        goal_angle = math.atan2(goal_dy, goal_dx)
+        
+        # Agent orientation (0:right, 1:up, 2:left, 3:down)
+        agent_angle = next_state["o"] * (math.pi / 2)
+        
+        # Calculate angle difference (0 means agent is facing goal)
+        angle_diff = abs(((goal_angle - agent_angle + math.pi) % (2 * math.pi)) - math.pi)
+        
+        # Higher reward when facing goal (angle_diff close to 0)
+        direction_reward = (math.pi - angle_diff) / math.pi
+        reward += direction_reward * 0.5
+        
+        # Action-specific adjustment
+        if action == 0:  # stay steady
+            # Small penalty for staying still unless very close to an obstacle
+            if (next_state["lidar_main_dist"] < 2 or 
+                next_state["lidar_left_dist"] < 1 or 
+                next_state["lidar_right_dist"] < 1):
+                reward += 0.05  # Small reward for caution
+            else:
+                reward -= 0.05  # Small penalty for inaction
+                
+        elif action == 1 and direction_reward > 0.7:  # moving forward while facing goal
+            reward += 0.2  # Bonus for efficient movement
+    
+    return reward

@@ -91,7 +91,7 @@ def train(config_path: str) -> MyAgent:
     
     # Initial reset of the environment
     state, info = env.reset()
-    time.sleep(1)
+    # REMOVED: time.sleep(1)
 
     try:
         while episode_count < max_episodes:
@@ -105,24 +105,30 @@ def train(config_path: str) -> MyAgent:
             # Update agent policy
             agent.update_policy(actions, state, rewards)
 
-            # Display of the step information
-            print(f"\rEpisode {episode_count + 1}, Step {info['current_step']}, "
-                  f"Reward: {total_reward:.2f}, "
-                  f"Evacuated: {len(info['evacuated_agents'])}, "
-                  f"Deactivated: {len(info['deactivated_agents'])}", end='')
+            # Display progress every 10 steps
+            if info['current_step'] % 10 == 0:
+                print(f"\rEpisode {episode_count + 1}, Step {info['current_step']}, "
+                      f"Reward: {total_reward:.2f}, "
+                      f"Evacuated: {len(info['evacuated_agents'])}, "
+                      f"Deactivated: {len(info['deactivated_agents'])}", end='')
             
-            # Pause
-            time.sleep(1)
+            # REMOVED: time.sleep(1)
             
             # If the episode is terminated
             if terminated or truncated:
-                print("\r")
+                print(f"\rEpisode {episode_count + 1} complete - "
+                      f"Reward: {total_reward:.2f}, "
+                      f"Evacuated: {len(info['evacuated_agents'])}, "
+                      f"Deactivated: {len(info['deactivated_agents'])}")
                 episode_count += 1
                 all_rewards.append(total_reward)
                 total_reward = 0
                 
                 if episode_count < max_episodes:
                     state, info = env.reset()
+                    
+                # Decay epsilon after each episode
+                agent.decay_epsilon()
 
     except KeyboardInterrupt:
         print("\nSimulation interrupted by the user")
@@ -162,7 +168,7 @@ def evaluate(configs_paths: list, trained_agent: MyAgent, num_episodes: int = 10
         
         # Initial reset of the environment
         state, info = env.reset()
-        time.sleep(1) 
+        # REMOVED: time.sleep(1) 
    
         # Run evaluation for the specified number of episodes
         try:
@@ -180,8 +186,7 @@ def evaluate(configs_paths: list, trained_agent: MyAgent, num_episodes: int = 10
                     f"Evacuated: {len(info['evacuated_agents'])}, "
                     f"Deactivated: {len(info['deactivated_agents'])}", end='')
             
-                # Pause
-                time.sleep(1)
+                # REMOVED: time.sleep(1)
 
                 # If the episode is terminated
                 if terminated or truncated:
