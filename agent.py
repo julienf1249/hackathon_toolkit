@@ -38,85 +38,85 @@ class MyAgent():
         self.learning_rate = 0.0005
         self.batch_size = 64
         self.memory_size = 100000
-        self.update_target_freq = 10000
-        self.training_steps = 0= 0
+        self.update_target_freq = 1000
+        self.training_steps = 0
         
-        # Create networks for each agent each agent
+        # Create networks for each agent
         self.policy_nets = []
-        self.target_nets = []self.target_nets = []
+        self.target_nets = []
         self.optimizers = []
-        self.replay_buffers = [][]
+        self.replay_buffers = []
         
-        for i in range(num_agents):for i in range(num_agents):
+        for i in range(num_agents):
             # Policy network (for action selection)
-            policy_net = DQN(self.state_dim, self.n_actions).to(self.device)cy_net = DQN(self.state_dim, self.n_actions).to(self.device)
+            policy_net = DQN(self.state_dim, self.n_actions).to(self.device)
             
-            # Target network (for stable Q-value targets)table Q-value targets)
-            target_net = DQN(self.state_dim, self.n_actions).to(self.device), self.n_actions).to(self.device)
-            target_net.load_state_dict(policy_net.state_dict())cy_net.state_dict())
-            target_net.eval()  # Target network is only used for inferencetwork is only used for inference
-               
-            # Optimizer            # Optimizer
-            optimizer = optim.Adam(policy_net.parameters(), lr=self.learning_rate)eters(), lr=self.learning_rate)
+            # Target network (for stable Q-value targets)
+            target_net = DQN(self.state_dim, self.n_actions).to(self.device)
+            target_net.load_state_dict(policy_net.state_dict())
+            target_net.eval()  # Target network is only used for inference
             
-            # Experience replay bufference replay buffer
-            replay_buffer = deque(maxlen=self.memory_size)    replay_buffer = deque(maxlen=self.memory_size)
+            # Optimizer
+            optimizer = optim.Adam(policy_net.parameters(), lr=self.learning_rate)
             
-            self.policy_nets.append(policy_net)append(policy_net)
-            self.target_nets.append(target_net)self.target_nets.append(target_net)
+            # Experience replay buffer
+            replay_buffer = deque(maxlen=self.memory_size)
+            
+            self.policy_nets.append(policy_net)
+            self.target_nets.append(target_net)
             self.optimizers.append(optimizer)
-            self.replay_buffers.append(replay_buffer)s.append(replay_buffer)
+            self.replay_buffers.append(replay_buffer)
         
-        # Store previous states and actions for learning states and actions for learning
-        self.previous_states = [None] * num_agents.previous_states = [None] * num_agents
-        self.previous_actions = [None] * num_agentsts
+        # Store previous states and actions for learning
+        self.previous_states = [None] * num_agents
+        self.previous_actions = [None] * num_agents
         self.loss_criterion = nn.MSELoss()
         
         # For parallel processing
         self.current_transitions = []
 
     def _state_to_tensor(self, state):
-        """Convert state array to a tensor with feature engineering"""t state array to a tensor with feature engineering"""
+        """Convert state array to a tensor with feature engineering"""
         # Extract basic features
-        pos_x, pos_y, orientation = state[0], state[1], state[2][2]
-        goal_x, goal_y = state[4], state[5]_x, goal_y = state[4], state[5]
+        pos_x, pos_y, orientation = state[0], state[1], state[2]
+        goal_x, goal_y = state[4], state[5]
         
         # Calculate relative position to goal
         rel_x = goal_x - pos_x
-        rel_y = goal_y - pos_yy = goal_y - pos_y
+        rel_y = goal_y - pos_y
         
-        # Distance to goal# Distance to goal
-        goal_dist = np.sqrt(rel_x**2 + rel_y**2).sqrt(rel_x**2 + rel_y**2)
-                
+        # Distance to goal
+        goal_dist = np.sqrt(rel_x**2 + rel_y**2)
+        
         # Relative angle to goal (in radians)
-        goal_angle = np.arctan2(rel_y, rel_x) - orientation * np.pi/2n * np.pi/2
-        goal_angle = (goal_angle + np.pi) % (2*np.pi) - np.pi  # Normalize to [-π, π]+ np.pi) % (2*np.pi) - np.pi  # Normalize to [-π, π]
+        goal_angle = np.arctan2(rel_y, rel_x) - orientation * np.pi/2
+        goal_angle = (goal_angle + np.pi) % (2*np.pi) - np.pi  # Normalize to [-π, π]
         
         # One-hot encode orientation
-        orientation_one_hot = [0, 0, 0, 0]orientation_one_hot = [0, 0, 0, 0]
-        orientation_one_hot[int(orientation)] = 1orientation)] = 1
+        orientation_one_hot = [0, 0, 0, 0]
+        orientation_one_hot[int(orientation)] = 1
         
-        # Extract LIDAR data (main + 8 directions)irections)
+        # Extract LIDAR data (main + 8 directions)
         lidar_data = []
         for i in range(6, 24, 2):
-            distance = state[i]tate[i]
-            object_type = state[i+1]object_type = state[i+1]
-            lidar_data.extend([distance, object_type])ject_type])
+            distance = state[i]
+            object_type = state[i+1]
+            lidar_data.extend([distance, object_type])
         
         # Compile all features
         features = [
-            pos_x, pos_y,pos_x, pos_y,
+            pos_x, pos_y,
             rel_x, rel_y,
             goal_dist,
-            np.sin(goal_angle), np.cos(goal_angle),np.sin(goal_angle), np.cos(goal_angle),
+            np.sin(goal_angle), np.cos(goal_angle),
             *orientation_one_hot,
             *lidar_data
         ]
         
         return torch.FloatTensor(features).to(self.device)
 
-    def get_action(self, states, evaluation=False):n(self, states, evaluation=False):
-        """Choose actions using epsilon-greedy policy""" actions using epsilon-greedy policy"""
+    def get_action(self, states, evaluation=False):
+        """Choose actions using epsilon-greedy policy"""
         actions = []
         
         for i in range(self.num_agents):
@@ -238,26 +238,3 @@ class MyAgent():
         for i, state_dict in enumerate(checkpoint['models']):
             self.policy_nets[i].load_state_dict(state_dict)
             self.target_nets[i].load_state_dict(state_dict)
-
-def compute_reward(num_agents, old_positions, agent_positions, evacuated_agents, deactivated_agents, goal_area):
-    rewards = np.zeros(num_agents)
-    
-    # Convert goal_area to a list of tuples for easier checking
-    goal_area_tuples = [tuple(g) for g in goal_area]
-    goal_center = np.mean(goal_area, axis=0)
-
-    # Compute reward for each agent
-    for i, (old_pos, new_pos) in enumerate(zip(old_positions, agent_positions)):
-        if i in evacuated_agents:
-            # Already evacuated agents get no additional reward
-            continue
-        elif i in deactivated_agents:
-            # Significant penalty for deactivation (collision)
-            rewards[i] = -100.0
-        elif tuple(new_pos) in goal_area_tuples:
-            # Substantial reward for reaching goal
-            rewards[i] = 1000.0
-            evacuated_agents.add(i)
-        else:
-            # Calculate the distances to goal before and after the move
-            old_distance = min(np.linalg.norm(np.array(old_pos) - np.array(goal)) for goal in goal_area)
